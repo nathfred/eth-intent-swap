@@ -37,7 +37,7 @@ async function main() {
 
   try {
     const wallet = await Wallet.fromEncryptedJson(encryptedKey, pass);
-    process.env.__RUNTIME_DEPLOYER_PRIVATE_KEY = wallet.privateKey;
+    process.env.RUNTIME_DEPLOYER_PRIVATE_KEY = wallet.privateKey;
 
     const hardhat = spawn("hardhat", ["deploy", ...process.argv.slice(2)], {
       stdio: "inherit",

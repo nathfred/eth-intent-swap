@@ -4,12 +4,12 @@ import { useCallback, useEffect, useState } from "react";
 import { ethers } from "ethers";
 import deployedContracts from "~~/contracts/deployedContracts";
 
-// Type definition for deployed contracts
+// Updated type definition to handle readonly properties
 type DeployedContracts = {
-  [chainId: string]: {
-    [contractName: string]: {
-      address: string;
-      abi: any[];
+  readonly [chainId: string]: {
+    readonly [contractName: string]: {
+      readonly address: string;
+      readonly abi: readonly any[];
     };
   };
 };
@@ -41,6 +41,7 @@ const IntentSwap = () => {
   const [swapIntents, setSwapIntents] = useState<SwapIntent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [userAddress, setUserAddress] = useState<string>("");
 
   // Common token addresses (you can expand this list)
   const commonTokens: TokenInfo[] = [
@@ -60,17 +61,29 @@ const IntentSwap = () => {
     const provider = new ethers.BrowserProvider(window.ethereum);
     await provider.send("eth_requestAccounts", []);
     const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    setUserAddress(address);
 
-    // Type assertion to handle the deployed contracts
+    // Cast to the correct type that matches the readonly structure
     const contracts = deployedContracts as DeployedContracts;
-    const chainId = "31337"; // or get dynamically from network
+
+    // Get the current network
+    const network = await provider.getNetwork();
+    const chainId = network.chainId.toString();
+
+    console.log("Current chainId:", chainId);
+    console.log("Available contracts:", Object.keys(contracts));
 
     if (!contracts[chainId] || !contracts[chainId].IntentSwap) {
-      throw new Error("IntentSwap contract not found for current network");
+      throw new Error(
+        `IntentSwap contract not found for network ${chainId}. Available networks: ${Object.keys(contracts).join(", ")}`,
+      );
     }
 
     const contractAddress = contracts[chainId].IntentSwap.address;
     const contractABI = contracts[chainId].IntentSwap.abi;
+
+    console.log("Contract address:", contractAddress);
 
     return new ethers.Contract(contractAddress, contractABI, signer);
   }, []);
@@ -81,27 +94,68 @@ const IntentSwap = () => {
       clearError();
 
       const contract = await getContract();
-      const userIntents = await contract.getUserIntents();
 
-      const formattedIntents: SwapIntent[] = userIntents.map((intent: any, index: number) => ({
-        id: Number(intent.id || index),
-        fromToken: intent.fromToken,
-        toToken: intent.toToken,
-        amountIn: ethers.formatEther(intent.amountIn),
-        minAmountOut: ethers.formatEther(intent.minAmountOut),
-        deadline: new Date(Number(intent.deadline) * 1000).toLocaleString(),
-        status: intent.fulfilled ? "Fulfilled" : intent.cancelled ? "Cancelled" : "Active",
-        creator: intent.creator,
-      }));
+      console.log("Calling getUserIntents...");
 
+      // First, let's try to get user intents with better error handling
+      let userIntents;
+      try {
+        userIntents = await contract.getUserIntents();
+        console.log("Raw userIntents response:", userIntents);
+      } catch (contractError) {
+        console.error("Contract call failed:", contractError);
+
+        // If getUserIntents fails, let's try to check if user has any intents by checking events
+        try {
+          const filter = contract.filters.IntentCreated(null, userAddress);
+          const events = await contract.queryFilter(filter);
+          console.log("IntentCreated events for user:", events);
+
+          if (events.length === 0) {
+            setSwapIntents([]);
+            return;
+          }
+        } catch (eventError) {
+          console.error("Event query failed:", eventError);
+        }
+
+        throw contractError;
+      }
+
+      // Handle empty response
+      if (!userIntents || userIntents.length === 0) {
+        console.log("No intents found for user");
+        setSwapIntents([]);
+        return;
+      }
+
+      const formattedIntents: SwapIntent[] = userIntents.map((intent: any, index: number) => {
+        console.log(`Processing intent ${index}:`, intent);
+
+        return {
+          id: Number(intent.id || index),
+          fromToken: intent.fromToken,
+          toToken: intent.toToken,
+          amountIn: ethers.formatEther(intent.amountIn),
+          minAmountOut: ethers.formatEther(intent.minAmountOut),
+          deadline: new Date(Number(intent.deadline) * 1000).toLocaleString(),
+          status: intent.fulfilled ? "Fulfilled" : intent.cancelled ? "Cancelled" : "Active",
+          creator: intent.creator,
+        };
+      });
+
+      console.log("Formatted intents:", formattedIntents);
       setSwapIntents(formattedIntents);
     } catch (err) {
       console.error("Error fetching swap intents:", err);
       setError(err instanceof Error ? err.message : "Failed to fetch swap intents");
+
+      // Set empty array on error to prevent further issues
+      setSwapIntents([]);
     } finally {
       setLoading(false);
     }
-  }, [getContract]);
+  }, [getContract, userAddress]);
 
   useEffect(() => {
     fetchSwapIntents();
@@ -128,12 +182,27 @@ const IntentSwap = () => {
         throw new Error("Please set a deadline");
       }
 
-      if (!ethers.isAddress(fromToken) || !ethers.isAddress(toToken)) {
-        throw new Error("Please enter valid token addresses");
+      // Allow ETH address as 0x0000000000000000000000000000000000000000
+      if (fromToken !== "0x0000000000000000000000000000000000000000" && !ethers.isAddress(fromToken)) {
+        throw new Error("Please enter a valid from token address");
+      }
+
+      if (!ethers.isAddress(toToken)) {
+        throw new Error("Please enter a valid to token address");
       }
 
       const contract = await getContract();
       const deadlineTimestamp = Math.floor(new Date(deadline).getTime() / 1000);
+
+      console.log("Creating swap intent with params:", {
+        fromToken,
+        toToken,
+        amountIn: ethers.parseEther(amountIn).toString(),
+        minAmountOut: ethers.parseEther(minAmountOut).toString(),
+        deadlineTimestamp,
+        value:
+          fromToken === "0x0000000000000000000000000000000000000000" ? ethers.parseEther(amountIn).toString() : "0",
+      });
 
       // Create the swap intent
       const tx = await contract.createSwapIntent(
@@ -147,7 +216,9 @@ const IntentSwap = () => {
         },
       );
 
+      console.log("Transaction sent:", tx.hash);
       await tx.wait();
+      console.log("Transaction confirmed");
 
       // Reset form
       setFromToken("");
@@ -203,6 +274,12 @@ const IntentSwap = () => {
         Create swap intents that can be fulfilled by solvers in the network. Set your terms and let the market find the
         best execution.
       </p>
+
+      {userAddress && (
+        <div className="text-sm text-gray-600">
+          Connected: {userAddress.slice(0, 6)}...{userAddress.slice(-4)}
+        </div>
+      )}
 
       {error && (
         <div className="w-full max-w-md p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">

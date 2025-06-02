@@ -6,11 +6,11 @@ export async function signSwapIntent(
   intent: {
     fromToken: string;
     toToken: string;
-    amountIn: BigInt;
-    minAmountOut: BigInt;
+    amountIn: bigint;
+    minAmountOut: bigint;
     recipient: string;
-    deadline: BigInt;
-    nonce: BigInt;
+    deadline: bigint;
+    nonce: bigint;
   },
   contractAddress: string,
   chainId: number,

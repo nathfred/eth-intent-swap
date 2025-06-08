@@ -95,31 +95,101 @@ const IntentSwap = () => {
 
       const contract = await getContract();
 
-      console.log("Calling getUserIntents...");
+      console.log("Calling getUserIntents for address:", userAddress);
+      console.log(
+        "Contract ABI functions:",
+        contract.interface.fragments.map(f => f.name),
+      );
 
-      // First, let's try to get user intents with better error handling
+      // Make sure we have a user address before calling the contract
+      if (!userAddress) {
+        console.log("No user address available yet");
+        setSwapIntents([]);
+        return;
+      }
+
+      // First, let's check if the function exists in the contract
+      const hasGetUserIntents = contract.interface.fragments.some(fragment => fragment.name === "getUserIntents");
+
+      console.log("Contract has getUserIntents function:", hasGetUserIntents);
+
       let userIntents;
-      try {
-        userIntents = await contract.getUserIntents();
-        console.log("Raw userIntents response:", userIntents);
-      } catch (contractError) {
-        console.error("Contract call failed:", contractError);
 
-        // If getUserIntents fails, let's try to check if user has any intents by checking events
+      if (hasGetUserIntents) {
         try {
-          const filter = contract.filters.IntentCreated(null, userAddress);
-          const events = await contract.queryFilter(filter);
-          console.log("IntentCreated events for user:", events);
+          console.log("Attempting to call getUserIntents...");
 
-          if (events.length === 0) {
+          // Alternative approach: Use provider.call directly to handle 0x responses
+          const provider = contract.runner?.provider;
+          if (provider) {
+            // Encode the function call manually
+            const functionFragment = contract.interface.getFunction("getUserIntents");
+            const encodedCall = contract.interface.encodeFunctionData("getUserIntents", [userAddress]);
+
+            console.log("Making raw call to contract...");
+            const rawResult = await provider.call({
+              to: await contract.getAddress(),
+              data: encodedCall,
+            });
+
+            console.log("Raw call result:", rawResult);
+
+            // Check if we got empty data
+            if (
+              rawResult === "0x" ||
+              rawResult === "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ) {
+              console.log("No intents found for user (empty response)");
+              setSwapIntents([]);
+              return;
+            }
+
+            // Try to decode the result
+            try {
+              userIntents = contract.interface.decodeFunctionResult("getUserIntents", rawResult);
+              console.log("Decoded userIntents:", userIntents);
+            } catch (decodeError) {
+              console.error("Failed to decode result:", decodeError);
+              throw decodeError;
+            }
+          } else {
+            // Fallback to regular call
+            userIntents = await contract.getUserIntents(userAddress);
+          }
+        } catch (contractError) {
+          console.error("getUserIntents call failed:", contractError);
+
+          // Check for various "no data" error patterns
+          if (
+            contractError.code === "BAD_DATA" ||
+            contractError.message?.includes("could not decode result data") ||
+            contractError.value === "0x" ||
+            contractError.message?.includes("0x")
+          ) {
+            console.log("No intents found for user (empty response from contract)");
             setSwapIntents([]);
             return;
           }
-        } catch (eventError) {
-          console.error("Event query failed:", eventError);
-        }
 
-        throw contractError;
+          // For other errors, fall back to event-based approach
+          console.log("Other error occurred, falling back to event-based intent fetching...");
+          try {
+            userIntents = await fetchIntentsFromEvents(contract, userAddress);
+          } catch (eventError) {
+            console.error("Event-based fetching also failed:", eventError);
+            setSwapIntents([]);
+            return;
+          }
+        }
+      } else {
+        console.log("getUserIntents function not found, using event-based approach");
+        try {
+          userIntents = await fetchIntentsFromEvents(contract, userAddress);
+        } catch (eventError) {
+          console.error("Event-based fetching failed:", eventError);
+          setSwapIntents([]);
+          return;
+        }
       }
 
       // Handle empty response
@@ -155,7 +225,63 @@ const IntentSwap = () => {
     } finally {
       setLoading(false);
     }
-  }, [getContract, userAddress]);
+  }, [getContract, userAddress]); // Make sure userAddress is in the dependency array
+
+  // Helper function to fetch intents from events
+  const fetchIntentsFromEvents = async (contract: ethers.Contract, userAddress: string) => {
+    try {
+      console.log("Fetching intents from IntentCreated events...");
+
+      // Get IntentCreated events for this user
+      const filter = contract.filters.IntentCreated(null, userAddress);
+      const events = await contract.queryFilter(filter);
+      console.log("IntentCreated events for user:", events);
+
+      if (events.length === 0) {
+        return [];
+      }
+
+      // For each event, try to get the current state of the intent
+      const intents = [];
+      for (const event of events) {
+        try {
+          const intentId = event.args?.[0]; // Assuming first arg is the intent ID
+
+          // Try to get individual intent data
+          // This assumes there's a function like getIntent(id) or similar
+          if (contract.interface.fragments.some(f => f.name === "getIntent")) {
+            const intentData = await contract.getIntent(intentId);
+            intents.push(intentData);
+          } else if (contract.interface.fragments.some(f => f.name === "intents")) {
+            // Try to access public mapping directly
+            const intentData = await contract.intents(intentId);
+            intents.push(intentData);
+          } else {
+            // If no getter function, reconstruct from event data
+            const eventData = {
+              id: intentId,
+              fromToken: event.args?.[2],
+              toToken: event.args?.[3],
+              amountIn: event.args?.[4],
+              minAmountOut: event.args?.[5],
+              deadline: event.args?.[6],
+              creator: event.args?.[1],
+              fulfilled: false, // We'd need additional events to determine this
+              cancelled: false,
+            };
+            intents.push(eventData);
+          }
+        } catch (intentError) {
+          console.error("Error fetching individual intent:", intentError);
+        }
+      }
+
+      return intents;
+    } catch (eventError) {
+      console.error("Event query failed:", eventError);
+      throw eventError;
+    }
+  };
 
   useEffect(() => {
     fetchSwapIntents();
@@ -297,7 +423,7 @@ const IntentSwap = () => {
         <div className="space-y-2">
           <label className="block text-sm font-medium text-gray-700">From Token</label>
           <select
-            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full p-3 border rounded-lg text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={fromToken}
             onChange={e => setFromToken(e.target.value)}
             disabled={loading}
@@ -310,7 +436,7 @@ const IntentSwap = () => {
             ))}
           </select>
           <input
-            className="w-full p-2 text-xs border rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className="w-full p-2 text-xs border rounded text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
             type="text"
             placeholder="Or enter custom token address"
             value={fromToken}
@@ -323,7 +449,7 @@ const IntentSwap = () => {
         <div className="space-y-2">
           <label className="block text-sm font-medium text-gray-700">To Token</label>
           <select
-            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full p-3 border rounded-lg text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={toToken}
             onChange={e => setToToken(e.target.value)}
             disabled={loading}
@@ -336,7 +462,7 @@ const IntentSwap = () => {
             ))}
           </select>
           <input
-            className="w-full p-2 text-xs border rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className="w-full p-2 text-xs border rounded text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
             type="text"
             placeholder="Or enter custom token address"
             value={toToken}
@@ -349,7 +475,7 @@ const IntentSwap = () => {
         <div className="space-y-2">
           <label className="block text-sm font-medium text-gray-700">Amount to Swap</label>
           <input
-            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full p-3 border rounded-lg text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             type="number"
             step="0.000001"
             placeholder="0.0"
@@ -363,7 +489,7 @@ const IntentSwap = () => {
         <div className="space-y-2">
           <label className="block text-sm font-medium text-gray-700">Minimum Amount to Receive</label>
           <input
-            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full p-3 border rounded-lg text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             type="number"
             step="0.000001"
             placeholder="0.0"
@@ -378,7 +504,7 @@ const IntentSwap = () => {
           <label className="block text-sm font-medium text-gray-700">Deadline</label>
           <div className="flex space-x-2">
             <input
-              className="flex-1 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex-1 p-3 border rounded-lg text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
               type="datetime-local"
               value={deadline}
               onChange={e => setDeadline(e.target.value)}

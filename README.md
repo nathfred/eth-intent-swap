@@ -28,22 +28,16 @@ Built on [Scaffold-ETH 2](https://github.com/scaffold-eth/scaffold-eth-2)
 ### 1. Clone the Repo
 
 ```bash
-git clone https://github.com/yourusername/eth-intent-swap.git
+git clone https://github.com/nathfred/eth-intent-swap.git
 cd eth-intent-swap
 ```
 
 ### 2. Install Dependencies
 ```bash
-Copy
-Edit
 pnpm install
 ```
 
 ### 3. Run Local Node & Frontend
-```bash
-Copy
-Edit
-```
 
 # Run local Hardhat node
 pnpm chain
@@ -59,17 +53,12 @@ Trigger backend/relayer to execute on-chain
 
 ### 5. Run the Relayer
 ```bash
-Copy
-Edit
 pnpm relayer
 ```
 
 📁 Project Structure
-pgsql
-Copy
-Edit
 contracts/        → Solidity smart contracts (IntentSwap, tokens)
-frontend/         → Scaffold-ETH 2 frontend
+nextjs/         → Scaffold-ETH 2 frontend
 scripts/          → Deployment scripts
 relayer/          → Off-chain relayer to execute signed intents
 🧪 Local Testing
